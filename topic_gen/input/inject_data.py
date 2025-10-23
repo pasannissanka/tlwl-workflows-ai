@@ -3,11 +3,14 @@ import pandas as pd
 from common.db import AbstractDB, PgDB
 
 class InjectData:
+    """Inject data from the database into the topic generation workflow"""
+    
     def __init__(self):
         self.db: AbstractDB = PgDB()
 
     def query_bookmarks(self, user_id: str) -> pd.DataFrame:
-        self.db.connect()
+        """Query all the bookmarks with their tags from the database"""
+        bookmarks_df = None
         query = """
                 select b.id as bookmark_id,
                        b.url,
@@ -24,8 +27,14 @@ class InjectData:
                          inner join bookmark b on b.id = bt.bookmark_id
                 where b.user_id = :user_id
                 """
-        bookmarks_df = self.db.query(query, {"user_id": user_id})
-        if bookmarks_df.empty:
+        try:
+            self.db.connect()
+            bookmarks_df = self.db.query(query, {"user_id": user_id})
+        except Exception as e:
+            raise RuntimeError("Failed to query bookmarks") from e
+        finally:
+            self.db.disconnect()
+        if bookmarks_df is None or bookmarks_df.empty:
             return []
         return bookmarks_df
 
