@@ -64,14 +64,43 @@ class TopicGen:
         ####################################################################################################################
         # Topic generation stage                                                                                           #
         ####################################################################################################################
-        for cluster_id in self.df["cluster"].unique():
-            cluster_df = self.df[self.df["cluster"] == cluster_id]
-            topic = self._generate_topic(cluster_df)
-            print(f"Cluster {cluster_id}: {topic}")
-            # Add the topic to the dataframe
-            self.df.loc[self.df["cluster"] == cluster_id, "topic"] = topic
+        # Get unique cluster IDs
+        cluster_ids = self.df["cluster"].unique()
+        
+        # Use ThreadPoolExecutor for parallel topic generation
+        with ThreadPoolExecutor(max_workers=min(len(cluster_ids), 4)) as executor:
+            # Submit all tasks
+            future_to_cluster = {
+                executor.submit(self._generate_topic_for_cluster, cluster_id): cluster_id 
+                for cluster_id in cluster_ids
+            }
+            
+            # Process completed tasks
+            for future in as_completed(future_to_cluster):
+                cluster_id = future_to_cluster[future]
+                try:
+                    topic = future.result()
+                    print(f"Cluster {cluster_id}: {topic}")
+                    # Add the topic to the dataframe
+                    self.df.loc[self.df["cluster"] == cluster_id, "topic"] = topic
+                except Exception as exc:
+                    print(f"Cluster {cluster_id} generated an exception: {exc}")
+                    # Set a default topic for failed clusters
+                    self.df.loc[self.df["cluster"] == cluster_id, "topic"] = "Unknown Topic"
 
         return self.df
+
+    def _generate_topic_for_cluster(self, cluster_id: int) -> str:
+        """Generate a topic for a specific cluster ID
+        
+        Args:
+            cluster_id (int): The cluster ID to generate a topic for
+            
+        Returns:
+            str: The generated topic
+        """
+        cluster_df = self.df[self.df["cluster"] == cluster_id]
+        return self._generate_topic(cluster_df)
 
     def _generate_topic(self, df: pd.DataFrame) -> str:
         """Generate a topic from a dataframe
