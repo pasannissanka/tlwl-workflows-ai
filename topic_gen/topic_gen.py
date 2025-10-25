@@ -1,20 +1,30 @@
-import pandas as pd
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import logging
+import numpy as np
+import pandas as pd
 
 from common.llm import OpenAILLM
 from topic_gen.clustering.cluster import AgglomerativeCluster
-from topic_gen.input.cleanup import CleanUpInput
-from topic_gen.input.inject_data import InjectData
+from topic_gen.data.cleanup import CleanUpInput
+from topic_gen.data.data import Data
 from topic_gen.prompt import TOPIC_GEN_SYSTEM_PROMPT, TOPIC_GEN_USER_PROMPT
+
+logger = logging.getLogger(__name__)
 
 
 class TopicGen:
     """TopicGen class for topic generation"""
 
     def __init__(self):
-        self.inject = InjectData()
-        self.clustering = AgglomerativeCluster()
+        self.data = Data()
+        self.clustering = AgglomerativeCluster(distance_threshold=1.2)
         self.llm = OpenAILLM(model="gpt-4o-mini")
+
+        # Data attributes
+        self.user_id: str = None
+        self.raw_df: pd.DataFrame = None
+        self.df: pd.DataFrame = None
+        self.cluster_df: pd.DataFrame = None
 
     def generate(self, user_id: str) -> pd.DataFrame:
         """Generate topics from a dataframe
@@ -28,10 +38,13 @@ class TopicGen:
         ####################################################################################################################
         # Input stage                                                                                                      #
         ####################################################################################################################
-        self.raw_df = self.inject.query_bookmarks(user_id)
+        logger.info(f"Generating topics for user {user_id}")
+        self.user_id = user_id
+        self.raw_df = self.data.query_bookmarks(self.user_id)
+        logger.debug(
+            f"Raw dataframe size: {len(self.raw_df)}, dimensions: {self.raw_df.shape}"
+        )
         self.df = CleanUpInput.cleanup(self.raw_df)
-
-        print(self.df.head(10))
 
         ####################################################################################################################
         # Filtering stage                                                                                                  #
@@ -48,6 +61,9 @@ class TopicGen:
         ]  # TODO: Make this a configurable parameter
         # Filter the original dataframe to only include bookmarks with the filtered tags
         self.df = self.df[self.df["tag_id"].isin(filtered_tags["tag_id"])]
+        logger.debug(
+            f"Filtered dataframe size: {len(self.df)}, dimensions: {self.df.shape}"
+        )
 
         ####################################################################################################################
         # Clustering stage                                                                                                 #
@@ -55,8 +71,8 @@ class TopicGen:
         # Get the unique tag keys dataframe
         tag_keys_df = self.df[["tag_id", "key"]].drop_duplicates()
         self.cluster_df = self.clustering.fit(tag_keys_df)
-        self.df = pd.merge(self.cluster_df, self.df, on="tag_id", how="left")
 
+        self.df = pd.merge(self.cluster_df, self.df, on="tag_id", how="left")
         # Drop, Rename unnecessary columns
         self.df = self.df.drop(columns=["key_x"])
         self.df = self.df.rename(columns={"key_y": "key"})
@@ -64,59 +80,73 @@ class TopicGen:
         ####################################################################################################################
         # Topic generation stage                                                                                           #
         ####################################################################################################################
-        # Get unique cluster IDs
-        cluster_ids = self.df["cluster"].unique()
-        
+        self.df = self._generate_topics(self.df)
+
+        ####################################################################################################################
+        # Persist stage                                                                                                   #
+        ####################################################################################################################
+        self._save_topics(self.df)
+
+        logger.debug(f"Generated topics for user {user_id}")
+        return self.df
+
+    def _generate_topics(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Generate topics for all clusters
+
+        Args:
+            df (pd.DataFrame): The dataframe to generate topics for.
+
+        Returns:
+            pd.DataFrame: A dataframe with the "topic" column (str) added to the dataframe
+        """
+        cluster_ids = df["cluster"].unique()
+        logger.debug(f"Generating topics for {len(cluster_ids)} clusters")
+
+        max_workers = min(len(cluster_ids), 4)
+        logger.debug(f"Using {max_workers} workers for topic generation")
         # Use ThreadPoolExecutor for parallel topic generation
-        with ThreadPoolExecutor(max_workers=min(len(cluster_ids), 4)) as executor:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
             # Submit all tasks
             future_to_cluster = {
-                executor.submit(self._generate_topic_for_cluster, cluster_id): cluster_id 
+                executor.submit(
+                    self._submit_topic_generation_job,
+                    df[df["cluster"] == cluster_id],
+                ): cluster_id
                 for cluster_id in cluster_ids
             }
-            
+
             # Process completed tasks
             for future in as_completed(future_to_cluster):
                 cluster_id = future_to_cluster[future]
                 try:
-                    topic = future.result()
-                    print(f"Cluster {cluster_id}: {topic}")
-                    # Add the topic to the dataframe
-                    self.df.loc[self.df["cluster"] == cluster_id, "topic"] = topic
+                    result = future.result()
+                    # Add the topic and score to the dataframe
+                    df.loc[df["cluster"] == cluster_id, "topic"] = result["topic"]
+                    df.loc[df["cluster"] == cluster_id, "score"] = result["score"]
                 except Exception as exc:
-                    print(f"Cluster {cluster_id} generated an exception: {exc}")
-                    # Set a default topic for failed clusters
-                    self.df.loc[self.df["cluster"] == cluster_id, "topic"] = "Unknown Topic"
+                    logger.error(f"Cluster {cluster_id} generated an exception: {exc}")
+                    # Set a default topic and score for failed clusters
+                    df.loc[df["cluster"] == cluster_id, "topic"] = np.nan
+                    df.loc[df["cluster"] == cluster_id, "score"] = np.nan
+        df = df.dropna(subset=["topic", "score"]).reset_index(drop=True)
+        logger.debug("Generated topics successfully")
+        return df
 
-        return self.df
-
-    def _generate_topic_for_cluster(self, cluster_id: int) -> str:
+    def _submit_topic_generation_job(self, cluster_df: pd.DataFrame) -> str:
         """Generate a topic for a specific cluster ID
-        
+
         Args:
             cluster_id (int): The cluster ID to generate a topic for
-            
+
         Returns:
             str: The generated topic
         """
-        cluster_df = self.df[self.df["cluster"] == cluster_id]
-        return self._generate_topic(cluster_df)
+        print(f"Generating topic for cluster {cluster_df.head(10)}")
 
-    def _generate_topic(self, df: pd.DataFrame) -> str:
-        """Generate a topic from a dataframe
-
-        Args:
-            df (pd.DataFrame): The dataframe to generate a topic from.
-
-        Returns:
-            str: The generated topic.
-        """
-        print(f"Generating topic for cluster {df.head(10)}")
-
-        tags_df = df[["tag_id", "key"]].drop_duplicates()
+        tags_df = cluster_df[["tag_id", "key"]].drop_duplicates()
         tags = tags_df["key"].unique().tolist()
 
-        bookmarks_df = df[
+        bookmarks_df = cluster_df[
             [
                 "bookmark_id",
                 "title",
@@ -129,7 +159,7 @@ class TopicGen:
         titles = bookmarks_df["title"].unique().tolist()
 
         system_prompt = TOPIC_GEN_SYSTEM_PROMPT
-        user_prompt = TOPIC_GEN_USER_PROMPT(tags, titles)
+        user_prompt = TOPIC_GEN_USER_PROMPT(tags=tags, titles=titles)
 
         messages = [
             {"role": "system", "content": system_prompt},
@@ -137,5 +167,64 @@ class TopicGen:
         ]
 
         response = self.llm.generate(messages=messages)
-        print(response)
-        return response.choices[0].message.content.strip()
+        topic = response.choices[0].message.content.strip()
+        score = self._calculate_score(tags, titles)
+
+        logger.debug(f"Topic generation successful: topic: {topic}, score: {score}")
+        return {
+            "topic": topic,
+            "score": score,
+        }
+
+    def _save_topics(self, df: pd.DataFrame) -> None:
+        """Save topics to the database
+
+        Args:
+            df (pd.DataFrame): The dataframe to persist topics for.
+
+        Returns:
+            None
+        """
+        cluster_ids = df["cluster"].unique()
+
+        self.data.connect(init_models=True)
+        with ThreadPoolExecutor(max_workers=min(len(cluster_ids), 4)) as executor:
+            future_to_cluster = {
+                executor.submit(
+                    self._submit_data_insertion_job,
+                    df[df["cluster"] == cluster_id],
+                ): cluster_id
+                for cluster_id in cluster_ids
+            }
+            for future in as_completed(future_to_cluster):
+                cluster_id = future_to_cluster[future]
+                try:
+                    future.result()
+                except Exception as exc:
+                    print(f"Cluster {cluster_id} failed to persist: {exc}")
+        return None
+
+    def _submit_data_insertion_job(self, cluster_df: pd.DataFrame) -> None:
+        data = {
+            "cluster_id": int(cluster_df["cluster"].unique()[0]),
+            "title": str(cluster_df["topic"].unique()[0]),
+            "type": "topic",
+            "tags": cluster_df["tag_id"].unique().tolist(),
+            "bookmarks": cluster_df["bookmark_id"].unique().tolist(),
+            "score": float(cluster_df["score"].unique()[0]),
+        }
+        self.data.insert_topics(data, self.user_id)
+        return None
+
+    def _calculate_score(self, tags: list[str], bookmarks: list[str]) -> float:
+        """Calculate the score for a cluster
+
+        Args:
+            tags (list[str]): The tags for the cluster
+            bookmarks (list[str]): The bookmarks for the cluster
+
+        Returns:
+            float: The score for the cluster
+        """
+        # TODO: Implement a proper score calculation
+        return len(tags) + len(bookmarks)
