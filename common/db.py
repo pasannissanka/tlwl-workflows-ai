@@ -1,4 +1,5 @@
 import abc
+from datetime import datetime
 import os
 
 import pandas as pd
@@ -106,6 +107,7 @@ class PgDB(AbstractDB):
             Column("type", String),
             Column("user_id", String),
             Column("score", Float),
+            Column("job_id", String),
             Column("created_at", DateTime),
             Column("updated_at", DateTime),
         )
@@ -123,8 +125,21 @@ class PgDB(AbstractDB):
             Column("bookmark_id", String, primary_key=True),
             Column("user_id", String),
         )
-        self.models = {
-            "topic": topic_table,
-            "topic_tags": topic_tags_table,
-            "topic_bookmarks": topic_bookmarks_table,
-        }
+        background_jobs_table = Table(
+            "background_jobs",
+            self.metadata,
+            Column("id", String, primary_key=True),
+            Column("user_id", String),
+            Column("type", String),
+            Column("metadata", String),
+            Column("status", String),
+            Column("error", String),
+            Column[str]("started_at", DateTime),
+            Column[str]("completed_at", DateTime),
+            Column("created_at", DateTime, default=datetime.now()),
+            Column("updated_at", DateTime, default=datetime.now()),
+        )
+        self.background_job_table: Table = background_jobs_table
+        self.topic_table: Table = topic_table
+        self.topic_tags_table: Table = topic_tags_table
+        self.topic_bookmarks_table: Table = topic_bookmarks_table

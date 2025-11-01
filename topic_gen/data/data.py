@@ -1,10 +1,11 @@
+import json
 import logging
 import uuid
 from datetime import datetime
 from typing import Any
 
 import pandas as pd
-from sqlalchemy.sql import insert
+from sqlalchemy.sql import insert, update
 
 from common.db import AbstractDB, PgDB
 
@@ -15,7 +16,7 @@ class Data:
     """Inject data from the database into the topic generation workflow"""
 
     def __init__(self):
-        self.db: AbstractDB = PgDB()
+        self.db: PgDB = PgDB()
 
     def connect(self, init_models: bool = False) -> None:
         """Connect to the database"""
@@ -35,7 +36,8 @@ class Data:
                        b.updated_at,
                        t.id as tag_id,
                        t."key",
-                       t."name"
+                       t."name",
+                       bt.relevance_score
                 from bookmark_tag bt
                          inner join tag t on bt.tag_id = t.id
                          inner join bookmark b on b.id = bt.bookmark_id
@@ -94,9 +96,9 @@ class Data:
         session = self.db.session()
 
         try:
-            topic_table = self.db.models["topic"]
-            topic_tags_table = self.db.models["topic_tags"]
-            topic_bookmarks_table = self.db.models["topic_bookmarks"]
+            topic_table = self.db.topic_table
+            topic_tags_table = self.db.topic_tags_table
+            topic_bookmarks_table = self.db.topic_bookmarks_table
             with session.begin():
                 logger.debug("Session started")
                 topic_id = uuid.uuid4()
@@ -109,6 +111,7 @@ class Data:
                         "type": data["type"],
                         "user_id": user_id,
                         "score": data["score"],
+                        "job_id": data["job_id"],
                         "created_at": datetime.now().isoformat(),
                         "updated_at": datetime.now().isoformat(),
                     }
@@ -142,3 +145,120 @@ class Data:
             logger.debug("Session closed")
             session.close()
         logger.debug(f"Topics inserted successfully for user {user_id}")
+
+    def create_background_job(self, user_id: str, type: str) -> None:
+        """Insert a background job into the database and return the job id
+
+        Args:
+            user_id (str): The user id to insert the background job for.
+            type (str): The type of background job to insert.
+
+        Returns:
+            str: The id of the inserted background job.
+        """
+        background_job_data = {
+            "user_id": user_id,
+            "type": type,
+            "metadata": json.dumps({}),
+            "status": "running",
+            "started_at": datetime.now().isoformat(),
+        }
+        try:
+            logger.debug(f"Inserting background job for user {user_id}")
+            self.db.connect(init_models=True)
+            background_job_table = self.db.background_job_table
+            session = self.db.session()
+            with session.begin():
+                logger.debug("Session started")
+                background_job_id = str(uuid.uuid4())
+                background_job_data["id"] = background_job_id
+                session.execute(insert(background_job_table), [background_job_data])
+                session.commit()
+                logger.debug(
+                    f"Background job inserted successfully, job id: {background_job_id}"
+                )
+                return background_job_id
+        except Exception as e:
+            logger.error(f"Failed to insert background job: {e}")
+            session.rollback()
+            logger.debug("Session rolled back")
+            raise RuntimeError(f"Failed to insert background job: {e}")
+        finally:
+            session.close()
+            logger.debug("Session closed")
+
+    def update_background_job(
+        self, job_id: str, status: str, metadata: dict = None, error: str = None
+    ) -> None:
+        """Update a background job in the database and return the updated job id
+
+        Args:
+            job_id (str): The id of the background job to update.
+            status (str): The status of the background job to update.
+            metadata (dict, optional): The metadata of the background job to update. Defaults to None.
+            error (str, optional): The error of the background job to update. Defaults to None.
+
+        Raises:
+            RuntimeError: If the background job cannot be updated.
+        """
+        try:
+            logger.debug(f"Updating background job {job_id}")
+            self.db.connect(init_models=True)
+            session = self.db.session()
+            with session.begin():
+                logger.debug("Session started")
+                session.execute(
+                    update(self.db.background_job_table)
+                    .where(self.db.background_job_table.c.id == job_id)
+                    .values(
+                        status=status,
+                        metadata=json.dumps(metadata),
+                        error=error,
+                        completed_at=(
+                            datetime.now().isoformat()
+                            if status == "completed"
+                            else None
+                        ),
+                        updated_at=datetime.now().isoformat(),
+                    )
+                    .returning(self.db.background_job_table.c.id)
+                )
+                session.commit()
+                logger.debug("Background job updated successfully")
+        except Exception as e:
+            logger.error(f"Failed to update background job: {e}")
+            session.rollback()
+            logger.debug("Session rolled back")
+            raise RuntimeError(f"Failed to update background job: {e}")
+        finally:
+            session.close()
+            logger.debug("Session closed")
+
+    def get_latest_background_job(self, user_id: str, type: str) -> dict | None:
+        query = """
+        select * from background_jobs bj where 
+            bj.user_id = :user_id and 
+            bj.type = :type and 
+            bj.status = :status
+        order by bj.created_at desc limit 1
+        """
+        try:
+            logger.debug(f"Getting latest background job for user {user_id}")
+            self.db.connect()
+            background_job_df = self.db.query(
+                query, {"user_id": user_id, "type": type, "status": "completed"}
+            )
+            if background_job_df.empty:
+                logger.warning(
+                    f"No previous successful background jobs found for user {user_id} and type {type}"
+                )
+                return None
+            return background_job_df.to_dict("records")[0]
+        except Exception as e:
+            logger.error(f"Failed to get latest background job for user {user_id}: {e}")
+            raise RuntimeError(
+                f"Failed to get latest background job for user {user_id}: {e}"
+            )
+        finally:
+            logger.debug("Connection closed")
+            self.db.disconnect()

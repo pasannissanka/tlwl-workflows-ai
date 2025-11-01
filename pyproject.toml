@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Add your description here"
 requires-python = ">=3.12"
 dependencies = [
+    "ipywidgets>=8.1.7",
     "langchain>=1.0.3",
     "langchain-openai>=1.0.1",
     "notebook>=7.4.7",
