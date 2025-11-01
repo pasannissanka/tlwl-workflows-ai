@@ -79,6 +79,7 @@ class Data:
             data (dict[str, Any]): data {
                 "cluster_id": str,
                 "title": str,
+                "description": str,
                 "type": str,
                 "tags": list[str],
                 "bookmarks": list[str],
@@ -104,6 +105,7 @@ class Data:
                         "id": str(topic_id),
                         "cluster_id": data["cluster_id"],
                         "title": data["title"],
+                        "description": data["description"],
                         "type": data["type"],
                         "user_id": user_id,
                         "score": data["score"],
@@ -114,13 +116,17 @@ class Data:
                 session.execute(insert(topic_table), topic_data)
 
                 tags = [
-                    {"topic_id": str(topic_id), "tag_id": str(tag)}
+                    {"topic_id": str(topic_id), "tag_id": str(tag), "user_id": user_id}
                     for tag in data["tags"]
                 ]
                 session.execute(insert(topic_tags_table), tags)
 
                 bookmarks = [
-                    {"topic_id": str(topic_id), "bookmark_id": str(bookmark)}
+                    {
+                        "topic_id": str(topic_id),
+                        "bookmark_id": str(bookmark),
+                        "user_id": user_id,
+                    }
                     for bookmark in data["bookmarks"]
                 ]
                 session.execute(insert(topic_bookmarks_table), bookmarks)

@@ -102,6 +102,7 @@ class PgDB(AbstractDB):
             Column("id", String, primary_key=True),
             Column("cluster_id", String),
             Column("title", String),
+            Column("description", String),
             Column("type", String),
             Column("user_id", String),
             Column("score", Float),
@@ -113,12 +114,14 @@ class PgDB(AbstractDB):
             self.metadata,
             Column("topic_id", String, primary_key=True),
             Column("tag_id", String, primary_key=True),
+            Column("user_id", String),
         )
         topic_bookmarks_table = Table(
             "topics_bookmarks",
             self.metadata,
             Column("topic_id", String, primary_key=True),
             Column("bookmark_id", String, primary_key=True),
+            Column("user_id", String),
         )
         self.models = {
             "topic": topic_table,
